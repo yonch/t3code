@@ -524,6 +524,11 @@ function isMissingGitCwdError(error: GitCommandError): boolean {
 function isNonRepositoryGitStderr(stderr: string): boolean {
   return stderr.toLowerCase().includes("not a git repository");
 }
+// A bare repository (or core.bare=true) has refs but no working tree, so
+// working-tree commands fail while branch commands still work.
+function isBareRepositoryGitStderr(stderr: string): boolean {
+  return stderr.toLowerCase().includes("must be run in a work tree");
+}
 function isUnbornHeadStderr(stderr: string): boolean {
   const normalized = stderr.toLowerCase();
   return (
@@ -1858,6 +1863,28 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     if (statusResult.exitCode !== 0) {
       if (isNonRepositoryGitStderr(statusResult.stderr)) {
         return NON_REPOSITORY_STATUS_DETAILS;
+      }
+      if (isBareRepositoryGitStderr(statusResult.stderr)) {
+        const [remote, hasOriginRemote] = yield* Effect.all(
+          [
+            readStatusDetailsRemote(cwd),
+            originRemoteExists(cwd).pipe(Effect.orElseSucceed(() => false)),
+          ],
+          { concurrency: "unbounded" },
+        );
+        return {
+          isRepo: true,
+          hasOriginRemote,
+          isDefaultBranch: remote.isDefaultBranch,
+          branch: remote.branch,
+          upstreamRef: remote.upstreamRef,
+          hasWorkingTreeChanges: false,
+          workingTree: { files: [], insertions: 0, deletions: 0 },
+          hasUpstream: remote.hasUpstream,
+          aheadCount: includeDivergence ? remote.aheadCount : 0,
+          behindCount: includeDivergence ? remote.behindCount : 0,
+          aheadOfDefaultCount: includeDivergence ? remote.aheadOfDefaultCount : 0,
+        } satisfies GitVcsDriver.GitStatusDetails;
       }
       return yield* new GitCommandError({
         ...gitCommandContext({

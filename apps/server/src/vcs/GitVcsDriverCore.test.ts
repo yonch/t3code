@@ -2222,6 +2222,29 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
       }),
     );
 
+    it.effect("reports branches for a checkout marked core.bare", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        yield* git(cwd, ["branch", "feature/other"]);
+        yield* git(cwd, ["config", "core.bare", "true"]);
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+
+        const status = yield* driver.statusDetails(cwd);
+        assert.equal(status.isRepo, true);
+        assert.equal(status.branch, initialBranch);
+        assert.equal(status.hasWorkingTreeChanges, false);
+
+        const refs = yield* driver.listRefs({ cwd });
+        assert.equal(refs.isRepo, true);
+        assert.sameMembers(
+          refs.refs.map((ref) => ref.name),
+          [initialBranch, "feature/other"],
+        );
+        assert.equal(refs.refs.find((ref) => ref.current)?.name, initialBranch);
+      }),
+    );
+
     it.effect("reports refName and dirty state for a repository", () =>
       Effect.gen(function* () {
         const cwd = yield* makeTmpDir();
