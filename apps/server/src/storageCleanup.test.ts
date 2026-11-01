@@ -339,6 +339,15 @@ const cleanupFixture = (
       } as unknown as ProviderSessionManager.ProviderSessionManagerV2["Service"]),
       Effect.provideService(Orchestrator.OrchestratorV2, {
         streamDomainEvents: Stream.suspend(() => events),
+        dispatch: (command: { threadId: ThreadId; branch?: string; expectedBranch?: string }) =>
+          Effect.sync(() => {
+            threads = threads.map((thread) =>
+              thread.id === command.threadId && thread.branch === command.expectedBranch
+                ? { ...thread, branch: command.branch ?? thread.branch }
+                : thread,
+            );
+            return {};
+          }),
       } as unknown as Orchestrator.OrchestratorV2["Service"]),
       Effect.provideService(SqlClient.SqlClient, ((strings: TemplateStringsArray) =>
         Effect.sync(() =>
@@ -421,6 +430,7 @@ const cleanupFixture = (
       setThreads: (next: typeof threads) => {
         threads = next;
       },
+      threads: () => threads,
       setDeletedThreads: (next: OrchestrationV2ThreadShell[]) => {
         deletedThreads = next;
       },
@@ -901,6 +911,27 @@ describe("deleted thread worktrees", () => {
         });
         expect(yield* fixture.fs.exists(fixture.worktree)).toBe(false);
       }).pipe(Effect.provide(cleanupTestLayer), Effect.scoped),
+  );
+
+  it.effect("removes a deleted thread's checkout after the agent switched branches", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(NOW_MS);
+      const fixture = yield* cleanupFixture({
+        ...DEFAULT_SERVER_SETTINGS.storageCleanup,
+        worktreeAfterDays: null,
+        worktreeOnDelete: true,
+      });
+      yield* fixture.command(fixture.worktree, ["branch", "-m", "renamed"]);
+      fixture.setDeletedThreads([parent(fixture.worktree)]);
+      fixture.setThreads([]);
+      expect((yield* fixture.service.runNow).entries[0]).toMatchObject({
+        outcome: "removed",
+        reason: "Thread was deleted",
+      });
+      expect(yield* fixture.fs.exists(fixture.worktree)).toBe(false);
+      const branches = yield* fixture.command(fixture.repo, ["branch", "--list", "renamed"]);
+      expect(branches.stdout.trim()).toBe("renamed");
+    }).pipe(Effect.provide(cleanupTestLayer), Effect.scoped),
   );
 
   it.effect("applies the remaining subagent's rules when deletion cleanup is off", () =>
@@ -1570,6 +1601,21 @@ describe("storage cleanup reports and local file policies", () => {
         yield* fs.writeFileString(`${worktree}/.git`, gitFile);
         expect((yield* service.runNow).entries[0]).toMatchObject({ outcome: "removed" });
         expect(fullStatusCalls()).toBe(0);
+      }),
+    ),
+  );
+  it.live("records the branch an agent switched to before removing its checkout", () =>
+    runCleanupTest(
+      Effect.gen(function* () {
+        const { service, fs, worktree, command, threads } = yield* cleanupFixture();
+        yield* command(worktree, ["branch", "-m", "renamed"]);
+        expect((yield* service.runNow).entries[0]).toMatchObject({
+          outcome: "kept",
+          reason: "Branch updated to renamed",
+        });
+        expect(threads()[0]?.branch).toBe("renamed");
+        expect((yield* service.runNow).entries[0]).toMatchObject({ outcome: "removed" });
+        expect(yield* fs.exists(worktree)).toBe(false);
       }),
     ),
   );
