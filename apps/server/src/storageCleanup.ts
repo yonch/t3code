@@ -1,4 +1,5 @@
 import {
+  CommandId,
   GitCommandError,
   OrchestrationV2AppThreadJson,
   OrchestrationV2ProviderSessionJson,
@@ -474,13 +475,11 @@ const make = Effect.gen(function* () {
   });
 
   // Use two small Git reads: statusDetailsLocal also diffs and counts for every worktree.
-  const branchChanged = Effect.fn("StorageCleanup.branchChanged")(function* (
-    cwd: string,
-    branch: string | null,
-  ) {
+  // Null when the checkout is missing, not a repository, or detached.
+  const checkedOutBranch = Effect.fn("StorageCleanup.checkedOutBranch")(function* (cwd: string) {
     const failure = (detail: string) =>
       new GitCommandError({
-        operation: "StorageCleanup.branchChanged",
+        operation: "StorageCleanup.checkedOutBranch",
         command: "git",
         cwd,
         detail,
@@ -489,7 +488,7 @@ const make = Effect.gen(function* () {
     const read = Effect.fnUntraced(function* (args: string[], allowedExitCode?: number) {
       const result = yield* git
         .execute({
-          operation: "StorageCleanup.branchChanged",
+          operation: "StorageCleanup.checkedOutBranch",
           cwd,
           args,
           env: { LC_ALL: "C" },
@@ -510,17 +509,17 @@ const make = Effect.gen(function* () {
       );
     });
     const index = yield* read(["rev-parse", "--git-path", "index"]);
-    if (index === null) return true;
+    if (index === null) return null;
     if (yield* fs.exists(`${path.resolve(cwd, index.stdout.trim())}.lock`))
       return yield* failure(
         "Git index is locked. Status will resume when the index lock is removed.",
       );
     // Detached HEAD exits 1; full refs avoid shortening when a tag shares the branch name.
     const head = yield* read(["symbolic-ref", "--quiet", "HEAD"], 1);
-    if (head === null) return true;
+    if (head === null) return null;
     const ref = head.exitCode === 0 ? head.stdout.trim() : "";
     const name = ref.startsWith("refs/heads/") ? ref.slice("refs/heads/".length).trim() : null;
-    return (name?.startsWith("(") ? null : name) !== branch;
+    return name?.startsWith("(") ? null : name;
   });
 
   const localChangesReason = Effect.fn("StorageCleanup.localChangesReason")(function* (
@@ -805,8 +804,38 @@ const make = Effect.gen(function* () {
           return keep("contains a project checkout");
         if ((yield* fs.stat(path.join(worktreePath, ".git"))).type !== "File")
           return keep("not a linked worktree");
-        if (yield* branchChanged(worktreePath, thread.branch))
-          return keep("repository or branch changed");
+        let worktreeBranch = thread.branch;
+        const checkedOut = yield* checkedOutBranch(worktreePath);
+        if (checkedOut !== thread.branch) {
+          const born =
+            checkedOut !== null &&
+            (yield* git.execute({
+              operation: "StorageCleanup.checkedOutBranch",
+              cwd: worktreePath,
+              args: ["rev-parse", "--verify", "--quiet", `refs/heads/${checkedOut}^{commit}`],
+              allowNonZeroExit: true,
+            })).exitCode === 0;
+          // A deleted owner keeps its old branch, so its live subagents could never match again.
+          if (!born || (deleted && group.length > 0)) return keep("repository or branch changed");
+          worktreeBranch = checkedOut;
+          // Resume recreates a removed checkout from the thread's branch, so adopt the agent's switch first.
+          if (!deleted) {
+            yield* Effect.forEach(
+              group,
+              (member) =>
+                engine.dispatch({
+                  type: "thread.metadata.update",
+                  commandId: CommandId.make(`storage-cleanup:branch:${member.id}:${now}`),
+                  threadId: member.id,
+                  branch: checkedOut,
+                  expectedBranch: thread.branch,
+                  expectedWorktreePath: member.worktreePath,
+                }),
+              { discard: true },
+            );
+            return keep(`branch updated to ${checkedOut}`);
+          }
+        }
         const changes = yield* localChangesReason(worktreePath, settings);
         if (changes !== null) return keep(changes);
         if (
@@ -985,7 +1014,7 @@ const make = Effect.gen(function* () {
         const bytes = yield* measureWorktree(worktreePath);
         const blockedWhileMeasuring = yield* blockedSinceCheck();
         if (blockedWhileMeasuring !== null) return keep(blockedWhileMeasuring);
-        if (yield* branchChanged(worktreePath, thread.branch))
+        if ((yield* checkedOutBranch(worktreePath)) !== worktreeBranch)
           return keep("repository or branch changed since check");
         if (
           (yield* git.resolveCommit({ cwd: worktreePath, revision: "HEAD" })).commitSha !==
