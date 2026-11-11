@@ -2280,12 +2280,15 @@ describe("storage cleanup reports and local file policies", () => {
       }),
     ),
   );
-  it.live("compares the checked-out branch without a full status", () =>
+  it.live("removes a worktree switched to another branch without a full status", () =>
     runCleanupTest(
       Effect.gen(function* () {
         const { service, fs, repo, worktree, command, setThreads, fullStatusCalls } =
           yield* cleanupFixture();
-        const changed = { outcome: "kept", reason: "Repository or branch changed" };
+        const changed = {
+          outcome: "kept",
+          reason: "Repository changed or no branch is checked out",
+        };
         yield* command(worktree, ["checkout", "--detach"]);
         expect((yield* service.runNow).entries[0]).toMatchObject(changed);
         yield* command(worktree, ["switch", "--orphan", "other"]);
@@ -2315,7 +2318,12 @@ describe("storage cleanup reports and local file policies", () => {
         yield* fs.writeFileString(`${worktree}/.git`, "gitdir: /missing-git-directory\n");
         expect((yield* service.runNow).entries[0]).toMatchObject(changed);
         yield* fs.writeFileString(`${worktree}/.git`, gitFile);
+        // Agents stack work on new branches; removal keeps the branch and its commits.
+        yield* command(worktree, ["switch", "-c", "stacked", "refs/heads/feature"]);
+        yield* command(worktree, ["commit", "--allow-empty", "-m", "stacked work"]);
+        const stacked = (yield* command(worktree, ["rev-parse", "refs/heads/stacked"])).stdout;
         expect((yield* service.runNow).entries[0]).toMatchObject({ outcome: "removed" });
+        expect((yield* command(repo, ["rev-parse", "refs/heads/stacked"])).stdout).toBe(stacked);
         expect(fullStatusCalls()).toBe(0);
       }),
     ),
