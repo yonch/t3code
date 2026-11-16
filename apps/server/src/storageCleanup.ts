@@ -1,4 +1,5 @@
 import {
+  CommandId,
   GitCommandError,
   OrchestrationV2AppThreadJson,
   OrchestrationV2ProviderSessionJson,
@@ -1177,6 +1178,21 @@ const make = Effect.gen(function* () {
           const changes = yield* localChangesReason(worktreePath, settings);
           if (changes !== null) return keep(changes);
         }
+        // Resume recreates a removed checkout from the thread's branch, so record the agent's switch.
+        if (checkedOut !== thread.branch)
+          yield* Effect.forEach(
+            group,
+            (member) =>
+              engine.dispatch({
+                type: "thread.metadata.update",
+                commandId: CommandId.make(`storage-cleanup:branch:${member.id}:${now}`),
+                threadId: member.id,
+                branch: checkedOut,
+                expectedBranch: member.branch,
+                expectedWorktreePath: member.worktreePath,
+              }),
+            { discard: true },
+          );
         yield* removeLinkedWorktree({
           operation: "StorageCleanup.cleanupGit",
           cwd: project.workspaceRoot,

@@ -425,6 +425,15 @@ const cleanupFixture = (
       } as unknown as ProviderSessionManager.ProviderSessionManagerV2["Service"]),
       Effect.provideService(Orchestrator.OrchestratorV2, {
         streamDomainEvents: Stream.suspend(() => events),
+        dispatch: (command: { threadId: ThreadId; branch?: string; expectedBranch?: string }) =>
+          Effect.sync(() => {
+            threads = threads.map((thread) =>
+              thread.id === command.threadId && thread.branch === command.expectedBranch
+                ? { ...thread, branch: command.branch ?? thread.branch }
+                : thread,
+            );
+            return {};
+          }),
       } as unknown as Orchestrator.OrchestratorV2["Service"]),
       Effect.provideService(SqlClient.SqlClient, ((strings: TemplateStringsArray) =>
         Effect.sync(() =>
@@ -517,6 +526,7 @@ const cleanupFixture = (
       setThreads: (next: typeof threads) => {
         threads = next;
       },
+      threads: () => threads,
       setOnLiveCheck: (hook: Effect.Effect<void>) => {
         onLiveCheck = hook;
       },
@@ -2283,7 +2293,7 @@ describe("storage cleanup reports and local file policies", () => {
   it.live("removes a worktree switched to another branch without a full status", () =>
     runCleanupTest(
       Effect.gen(function* () {
-        const { service, fs, repo, worktree, command, setThreads, fullStatusCalls } =
+        const { service, fs, repo, worktree, command, setThreads, threads, fullStatusCalls } =
           yield* cleanupFixture();
         const changed = {
           outcome: "kept",
@@ -2324,6 +2334,8 @@ describe("storage cleanup reports and local file policies", () => {
         const stacked = (yield* command(worktree, ["rev-parse", "refs/heads/stacked"])).stdout;
         expect((yield* service.runNow).entries[0]).toMatchObject({ outcome: "removed" });
         expect((yield* command(repo, ["rev-parse", "refs/heads/stacked"])).stdout).toBe(stacked);
+        // Resume recreates the checkout from the thread's branch.
+        expect(threads()[0]?.branch).toBe("stacked");
         expect(fullStatusCalls()).toBe(0);
       }),
     ),
