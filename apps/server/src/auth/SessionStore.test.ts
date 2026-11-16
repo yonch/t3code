@@ -345,6 +345,20 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("SessionStore.lay
     }),
   );
 
+  it.effect("keeps a paired session valid for three years by default", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionStore.SessionStore;
+      const issued = yield* sessions.issue({ method: "bearer-access-token" });
+
+      yield* TestClock.adjust(Duration.days(31));
+      expect((yield* sessions.verify(issued.token)).sessionId).toBe(issued.sessionId);
+
+      yield* TestClock.adjust(Duration.days(3 * 365 - 31));
+      const error = yield* Effect.flip(sessions.verify(issued.token));
+      expect(error._tag).toBe("SessionTokenExpiredError");
+    }).pipe(Effect.provide(Layer.merge(layerSessionStore(), TestClock.layer()))),
+  );
+
   it.effect("carries a runtime-mode ceiling only on sessions issued with one", () =>
     Effect.gen(function* () {
       const sessions = yield* SessionStore.SessionStore;
